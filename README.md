@@ -13,6 +13,10 @@ pip install tables pandas scipy Pywavelets
 
 ## Datasets
 The datasets can be download from [https://github.com/Davidham3/STSGCN], [https://github.com/liyaguang/DCRNN] and [https://github.com/yuyolshin/SeoulSpeedData]. The splited datasets can download from [here](https://pan.quark.cn/s/5ed91f4d60b5).
+Also, you can generate the data by running the following code.
+```
+python data_pre.py
+```
 
 ## Train Commands
 Run the following code to train the model.
