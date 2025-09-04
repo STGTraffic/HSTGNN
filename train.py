@@ -14,18 +14,14 @@ import torch.optim as optim
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=str, default="cuda:0", help="")
 parser.add_argument("--data", type=str, default="PEMS08", help="data path")
-parser.add_argument("--input_dim", type=int, default=3, help="input_dim")
-parser.add_argument("--channels", type=int, default=128, help="number of nodes")
-parser.add_argument("--num_nodes", type=int, default=170, help="number of nodes")
-parser.add_argument("--input_len", type=int, default=12, help="input_len")
-parser.add_argument("--output_len", type=int, default=12, help="out_len")
+parser.add_argument("--input_dim", type=int, default=3, help="number of input_dim")
 parser.add_argument("--batch_size", type=int, default=64, help="batch size")
 parser.add_argument("--learning_rate", type=float, default=0.001, help="learning rate")
 parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
 parser.add_argument(
     "--weight_decay", type=float, default=0.0001, help="weight decay rate"
 )
-parser.add_argument("--epochs", type=int, default=200, help="")
+parser.add_argument("--epochs", type=int, default=500, help="")
 parser.add_argument("--print_every", type=int, default=50, help="")
 parser.add_argument(
     "--save",
@@ -33,12 +29,14 @@ parser.add_argument(
     default="./logs/" + str(time.strftime("%Y-%m-%d-%H:%M:%S")) + "-",
     help="save path",
 )
+parser.add_argument("--expid", type=int, default=1, help="experiment id")
 parser.add_argument(
     "--es_patience",
     type=int,
     default=100,
     help="quit if no improvement after this many iterations",
 )
+
 args = parser.parse_args()
 
 
@@ -47,37 +45,33 @@ class trainer:
         self,
         scaler,
         input_dim,
-        channels,
         num_nodes,
-        input_len,
-        output_len,
+        channels,
         dropout,
         lrate,
         wdecay,
         device,
+        granularity,
     ):
         self.model = HSTGNN(
-            device, input_dim, channels, num_nodes, input_len, output_len, dropout
+            device, input_dim, num_nodes, channels, granularity, dropout
         )
         self.model.to(device)
         self.optimizer = Ranger(self.model.parameters(), lr=lrate, weight_decay=wdecay)
-        #self.optimizer = optim.Adam(self.model.parameters(), lr=lrate, weight_decay=wdecay)
+        # self.optimizer = optim.Adam(self.model.parameters(), lr=lrate, weight_decay=wdecay)
         self.loss = util.MAE_torch
         self.scaler = scaler
         self.clip = 5
         print("The number of parameters: {}".format(self.model.param_num()))
         print(self.model)
-        # exit()
 
     def train(self, input, real_val):
-        # input 64 1 170 12
-        # real_val 64 17 12
         self.model.train()
         self.optimizer.zero_grad()
-        output = self.model(input)  # 64 12 170 1
-        output = output.transpose(1, 3)  # 64 1 170 12
-        real = torch.unsqueeze(real_val, dim=1)  # 64 1 170 12
-        predict = self.scaler.inverse_transform(output)  # 64 1 170 12
+        output = self.model(input)
+        output = output.transpose(1, 3)
+        real = torch.unsqueeze(real_val, dim=1)
+        predict = self.scaler.inverse_transform(output)
         loss = self.loss(predict, real, 0.0)
         loss.backward()
         if self.clip is not None:
@@ -102,12 +96,12 @@ class trainer:
 
 
 def seed_it(seed):
-    random.seed(seed) 
+    random.seed(seed)
     os.environ["PYTHONSEED"] = str(seed)
     np.random.seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) 
-    torch.backends.cudnn.deterministic = True 
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.enabled = True
     torch.manual_seed(seed)
 
@@ -117,50 +111,71 @@ def main():
 
     data = args.data
 
-    if args.data == "PEMSBAY":
+    if args.data == "PEMS08":
         args.data = "data//" + args.data
-        args.num_nodes = 325
-
-    elif args.data == "PEMS08":
-        args.data = "data//" + args.data
-        args.num_nodes = 170
-        
-    elif args.data == "PEMS04":
-        args.data = "data//" + args.data
-        args.num_nodes = 307
-    
-    elif args.data == "PEMS08_60":
-        args.data = "data//" + args.data
-        args.num_nodes = 170
-        args.input_len = 60
-        args.output_len = 60
-
-    
-    elif args.data == "Urban_60":
-        args.data = "data//" + args.data
-        args.num_nodes = 304
-        args.input_len = 60
-        args.output_len = 60
+        num_nodes = 170
+        granularity = 288
+        channels = 48
 
     elif args.data == "PEMS03":
         args.data = "data//" + args.data
-        args.num_nodes = 358
+        num_nodes = 358
         args.epochs = 300
         args.es_patience = 100
+        granularity = 288
+        channels = 32
 
-    elif args.data == "Urban":
+    elif args.data == "PEMS04":
         args.data = "data//" + args.data
-        args.num_nodes = 304
+        num_nodes = 307
+        granularity = 288
+        channels = 48
+    
+    elif args.data == "PEMS-BAY":
+        args.data = "data//" + args.data
+        num_nodes = 325
+        granularity = 288
+        channels = 48
+        
+    elif args.data == "Urban-core":
+        args.data = "data//" + args.data
+        num_nodes = 304
+        granularity = 288
+        channels = 48
 
-    elif args.data == "METRLA":
-        args.data = "data/METRLA"
-        args.num_nodes = 207
 
-    elif args.data == "PEMS03_60":
-        args.data = "data//"+args.data
-        args.num_nodes = 358
-        args.epochs = 300
+    elif args.data == "PEMS07":
+        args.data = "data//" + args.data
+        num_nodes = 883
+        granularity = 288
+        channels = 128
 
+
+    elif args.data == "bike_drop":
+        args.data = "data//" + args.data
+        num_nodes = 250
+        granularity = 48
+        channels = 32
+
+
+    elif args.data == "bike_pick":
+        args.data = "data//" + args.data
+        num_nodes = 250
+        granularity = 48
+        channels = 32
+
+
+    elif args.data == "taxi_drop":
+        args.data = "data//" + args.data
+        num_nodes = 266
+        granularity = 48
+        channels = 96
+
+    elif args.data == "taxi_pick":
+        args.data = "data//" + args.data
+        num_nodes = 266
+        granularity = 48
+        channels = 96
 
 
     device = torch.device(args.device)
@@ -189,20 +204,18 @@ def main():
     engine = trainer(
         scaler,
         args.input_dim,
-        args.channels,
-        args.num_nodes,
-        args.input_len,
-        args.output_len,
+        num_nodes,
+        channels,
         args.dropout,
         args.learning_rate,
         args.weight_decay,
         device,
+        granularity,
     )
 
     print("start training...", flush=True)
 
     for i in range(1, args.epochs + 1):
-        # train
         train_loss = []
         train_mape = []
         train_rmse = []
@@ -211,7 +224,7 @@ def main():
         t1 = time.time()
         # dataloader['train_loader'].shuffle()
         for iter, (x, y) in enumerate(dataloader["train_loader"].get_iterator()):
-            trainx = torch.Tensor(x).to(device)  # 64 12 170 1
+            trainx = torch.Tensor(x).to(device)
             trainx = trainx.transpose(1, 3)
             trainy = torch.Tensor(y).to(device)
             trainy = trainy.transpose(1, 3)
@@ -238,7 +251,6 @@ def main():
         print(log.format(i, (t2 - t1)))
         train_time.append(t2 - t1)
 
-        # validation
         valid_loss = []
         valid_mape = []
         valid_wmape = []
@@ -329,7 +341,7 @@ def main():
                 armse = []
                 test_m = []
 
-                for j in range(args.output_len):
+                for j in range(12):
                     pred = scaler.inverse_transform(yhat[:, :, j])
                     real = realy[:, :, j]
                     metrics = util.metric(pred, real)
@@ -382,11 +394,9 @@ def main():
         if epochs_since_best_mae >= args.es_patience and i >= 300:
             break
 
-    # Output consumption
     print("Average Training Time: {:.4f} secs/epoch".format(np.mean(train_time)))
     print("Average Inference Time: {:.4f} secs".format(np.mean(val_time)))
 
-    # test
     print("Training ends")
     print("The epoch of the best result：", bestid)
     print("The valid loss of the best model", str(round(his_loss[bestid - 1], 4)))
@@ -413,7 +423,7 @@ def main():
 
     test_m = []
 
-    for i in range(args.output_len):
+    for i in range(12):
         pred = scaler.inverse_transform(yhat[:, :, i])
         real = realy[:, :, i]
         metrics = util.metric(pred, real)
