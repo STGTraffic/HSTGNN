@@ -1,11 +1,138 @@
-from time import sleep
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import numpy as np
 import pywt
 
+class GLU(nn.Module):
+    def __init__(self, features, dropout=0.1):
+        super(GLU, self).__init__()
+        self.conv1 = nn.Conv2d(features, features, (1, 1))
+        self.conv2 = nn.Conv2d(features, features, (1, 1))
+        self.conv3 = nn.Conv2d(features, features, (1, 1))
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x1 = self.conv1(x)
+        x2 = self.conv2(x)
+        out = x1 * torch.sigmoid(x2)
+        out = self.dropout(out)
+        out = self.conv3(out)
+        return out
+
+
+class TemporalEmbedding(nn.Module):
+    def __init__(self, time, features):
+        super(TemporalEmbedding, self).__init__()
+
+        self.time = time
+        self.time_day = nn.Parameter(torch.empty(time, features))
+        nn.init.xavier_uniform_(self.time_day)
+
+        self.time_week = nn.Parameter(torch.empty(7, features))
+        nn.init.xavier_uniform_(self.time_week)
+
+    def forward(self, x):
+        day_emb = x[..., 1]
+        time_day = self.time_day[(day_emb[:, :, :] * self.time).type(torch.LongTensor)]
+        time_day = time_day.transpose(1, 2).contiguous()
+
+        week_emb = x[..., 2]
+        time_week = self.time_week[(week_emb[:, :, :]).type(torch.LongTensor)]
+        time_week = time_week.transpose(1, 2).contiguous()
+
+        tem_emb = time_day + time_week
+
+        tem_emb = tem_emb.permute(0,3,1,2)
+
+        return tem_emb
+
+class TATT_1(nn.Module):
+    def __init__(self, c_in, num_nodes, tem_size):
+        super(TATT_1, self).__init__()
+
+        self.conv1 = nn.Conv2d(c_in, 1, kernel_size=(1, 1),
+                            stride=(1, 1), bias=False)
+        self.conv2 = nn.Conv2d(num_nodes, 1, kernel_size=(1, 1),
+                            stride=(1, 1), bias=False)
+        self.w = nn.Parameter(torch.rand(num_nodes, c_in), requires_grad=True)
+        nn.init.xavier_uniform_(self.w)
+
+        self.b = nn.Parameter(torch.zeros(tem_size, tem_size), requires_grad=True)
+        self.v = nn.Parameter(torch.rand(tem_size, tem_size), requires_grad=True)
+        nn.init.xavier_uniform_(self.v)
+        # nn.init.xavier_uniform_(self.b)
+        self.bn = nn.BatchNorm1d(tem_size)
+
+    def forward(self, seq):
+
+        seq = seq.transpose(3, 2)
+
+        seq = seq.permute(0, 1, 3, 2).contiguous()
+        c1 = seq.permute(0, 1, 3, 2)  # b,c,n,l->b,c,l,n
+        f1 = self.conv1(c1).squeeze()  # b,l,n
+
+        c2 = seq.permute(0, 2, 1, 3)  # b,c,n,l->b,n,c,l
+        f2 = self.conv2(c2).squeeze(axis=1)  # b,c,n  [50, 1, 12]
+
+        logits = torch.sigmoid(torch.matmul(torch.matmul(f1, self.w), f2) + self.b)
+        logits = torch.matmul(self.v, logits)
+        logits = logits.permute(0, 2, 1).contiguous()
+
+        logits = self.bn(logits).permute(0, 2, 1).contiguous()
+
+        coefs = torch.softmax(logits, -1)
+        T_coef = coefs.transpose(-1, -2)
+
+        x_1 = torch.einsum('bcnl,blq->bcnq', seq, T_coef)
+
+        return x_1
+
+class DualChannelLearner(nn.Module):
+    def __init__(self, features=128, layers=4, length=12, num_nodes=170, dropout=0.1):
+        super(DualChannelLearner, self).__init__()
+
+
+        self.low_freq_layers = nn.ModuleList([
+            TATT_1(features, num_nodes, length) for _ in range(layers)
+        ])
+
+
+        kernel_size = int(length / layers + 1)
+        dilation_size = None
+        self.high_freq_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(
+                    features, 
+                    features, 
+                    (1, kernel_size)),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            ) for _ in range(layers)
+        ])
+
+        self.alpha = nn.Parameter(torch.tensor(-5.0))
+
+    def forward(self, XL, XH):
+        res_xl = XL
+        res_xh = XH
+
+        for layer in self.low_freq_layers:
+            XL = layer(XL)
+        XL = XL + res_xl
+
+
+        XH = nn.functional.pad(XH, (1, 0, 0, 0))  
+        for layer in self.high_freq_layers:
+            XH = layer(XH)  
+        #print(XH.shape)
+        XH = XH + res_xh
+
+        alpha_sigmoid = torch.sigmoid(self.alpha)
+        output = alpha_sigmoid * XL + (1 - alpha_sigmoid) * XH
+
+        return output 
+    
 class Diffusion_GCN(nn.Module):
     def __init__(self, channels=128, diffusion_step=1, dropout=0.1):
         super().__init__()
@@ -14,8 +141,6 @@ class Diffusion_GCN(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, adj):
-        #print(x.shape)
-        #print(adj.shape)
         out = []
         for i in range(0, self.diffusion_step):
             if adj.dim() == 3:
@@ -27,8 +152,8 @@ class Diffusion_GCN(nn.Module):
         x = torch.cat(out, dim=1)
         x = self.conv(x)
         output = self.dropout(x)
-        #print(output.shape)
         return output
+
 class GraphAttentionLayer(nn.Module):
     """
     Simple GAT layer, similar to https://arxiv.org/abs/1710.10903
@@ -103,358 +228,154 @@ class GAT(nn.Module):
             x = torch.cat([x, x2], dim=-1)
         x = F.elu(self.out_att(x, adj))
         return x    
-    
-class LayerNorm(nn.Module):
-    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
-        super(LayerNorm, self).__init__()
-        self.eps = eps
-        self.normalized_shape = tuple(normalized_shape)
-        self.elementwise_affine = elementwise_affine
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(self.normalized_shape))
-            self.bias = nn.Parameter(torch.zeros(self.normalized_shape))
 
-    def forward(self, input):
-        mean = input.mean(dim=(1, 2), keepdim=True)
-        variance = input.var(dim=(1, 2), unbiased=False, keepdim=True)
-        input = (input - mean) / torch.sqrt(variance + self.eps)
-        if self.elementwise_affine:
-            input = input * self.weight + self.bias
-        return input
-
-
-
-
-class GLU(nn.Module):
-    def __init__(self, features, dropout=0.1):
-        super(GLU, self).__init__()
-        self.conv1 = nn.Conv2d(features, features, (1, 1))
-        self.conv2 = nn.Conv2d(features, features, (1, 1))
-        self.conv3 = nn.Conv2d(features, features, (1, 1))
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        x1 = self.conv1(x)
-        x2 = self.conv2(x)
-        out = x1 * torch.sigmoid(x2)
-        out = self.dropout(out)
-        out = self.conv3(out)
-        return out
-
-
-class Conv(nn.Module):
-    def __init__(self, features, dropout=0.1):
-        super(Conv, self).__init__()
-        self.conv = nn.Conv2d(features, features, (1, 1))
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        return x
-
-
-class TemporalEmbedding(nn.Module):
-    def __init__(self, time, features):
-        super(TemporalEmbedding, self).__init__()
-
-        self.time = time
-        # temporal embeddings
-        self.time_day = nn.Parameter(torch.empty(time, features))
-        nn.init.xavier_uniform_(self.time_day)
-
-        self.time_week = nn.Parameter(torch.empty(7, features))
-        nn.init.xavier_uniform_(self.time_week)
-
-    def forward(self, x):
-
-        day_emb = x[..., 1]  
-        time_day = self.time_day[
-            (day_emb[:, -1, :] * self.time).type(torch.LongTensor)
-        ]  
-        time_day = time_day.transpose(1, 2).unsqueeze(-1)
-
-        week_emb = x[..., 2]  
-        time_week = self.time_week[
-            (week_emb[:, -1, :]).type(torch.LongTensor)
-        ]  
-        time_week = time_week.transpose(1, 2).unsqueeze(-1)
-
-        return time_day, time_week
-
-
-class PreNorm(nn.Module):
-    def __init__(self, dim, fn):
+class Graph_Generator(nn.Module):
+    def __init__(self, channels=128, num_nodes=170, length=12, diffusion_step=1, dropout=0.1):
         super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-
-        return self.fn(self.norm(x), **kwargs)
-
-
-class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout)
-        )
+        self.E_s = nn.Parameter(torch.randn(channels, num_nodes))
+        self.length = length
+        self.E_tod = nn.Parameter(torch.randn(1, channels, 1, length))
+        self.E_dow = nn.Parameter(torch.randn(1, channels, 1, length))
+        nn.init.xavier_uniform_(self.E_s)
+        nn.init.xavier_uniform_(self.E_tod)
+        nn.init.xavier_uniform_(self.E_dow)
+        self.fc = nn.Linear(2,1)
+        
     def forward(self, x):
-        return self.net(x)
-
-
-
-class TATT_1(nn.Module):
-    def __init__(self, c_in, num_nodes, tem_size):
-        super(TATT_1, self).__init__()
-
-        self.conv1 = nn.Conv2d(c_in, 1, kernel_size=(1, 1),
-                            stride=(1, 1), bias=False)
-        self.conv2 = nn.Conv2d(num_nodes, 1, kernel_size=(1, 1),
-                            stride=(1, 1), bias=False)
-        self.w = nn.Parameter(torch.rand(num_nodes, c_in), requires_grad=True)
-        nn.init.xavier_uniform_(self.w)
-
-        self.b = nn.Parameter(torch.zeros(tem_size, tem_size), requires_grad=True)
-        self.v = nn.Parameter(torch.rand(tem_size, tem_size), requires_grad=True)
-        nn.init.xavier_uniform_(self.v)
-        # nn.init.xavier_uniform_(self.b)
-        self.bn = nn.BatchNorm1d(tem_size)
-
-    def forward(self, seq):
-
-        seq = seq.transpose(3, 2)
-
-        seq = seq.permute(0, 1, 3, 2).contiguous()
-        c1 = seq.permute(0, 1, 3, 2)  # b,c,n,l->b,c,l,n
-        f1 = self.conv1(c1).squeeze()  # b,l,n
-
-        c2 = seq.permute(0, 2, 1, 3)  # b,c,n,l->b,n,c,l
-        f2 = self.conv2(c2).squeeze(axis=1)  # b,c,n  [50, 1, 12]
-
-        logits = torch.sigmoid(torch.matmul(torch.matmul(f1, self.w), f2) + self.b)
-        logits = torch.matmul(self.v, logits)
-        logits = logits.permute(0, 2, 1).contiguous()
-
-        logits = self.bn(logits).permute(0, 2, 1).contiguous()
-
-        coefs = torch.softmax(logits, -1)
-        T_coef = coefs.transpose(-1, -2)
-
-        x_1 = torch.einsum('bcnl,blq->bcnq', seq, T_coef)
-
-        return x_1
-
-
-class DualChannelLearner(nn.Module):
-    def __init__(self, features=128, layers=4, length=12, num_nodes=170, dropout=0.1):
-        super(DualChannelLearner, self).__init__()
-
-
-        self.low_freq_layers = nn.ModuleList([
-            TATT_1(features, num_nodes, length) for _ in range(layers)
-        ])
-
-        kernel_size = int(length / layers + 1)
-        self.high_freq_layers = nn.ModuleList([
-            nn.Sequential(
-            nn.Conv2d(features, features, (1, kernel_size)),
-            nn.ReLU(),
-            nn.Dropout(dropout)) for _ in range(layers)
-        ])
-
-        self.alpha = nn.Parameter(torch.tensor(-5.0))
-
-    def forward(self, XL, XH):
-        res_xl = XL
-        res_xh = XH
-
-        for layer in self.low_freq_layers:
-            XL = layer(XL)
+        E_t = x*self.E_tod*self.E_tod
         
-        XL = (res_xl[..., -1] + XL[..., -1]).unsqueeze(-1)
-
-        XH = nn.functional.pad(XH, (1, 0, 0, 0))  
-        
-
-        for layer in self.high_freq_layers:
-            XH = layer(XH)  
-
-        XH = (res_xh[..., -1] + XH[..., -1]).unsqueeze(-1)
-
-        alpha_sigmoid = torch.sigmoid(self.alpha)
-        output = alpha_sigmoid * XL + (1 - alpha_sigmoid) * XH
-
-        return output 
- 
-class HGL_layer(nn.Module):
-    def __init__(self, device, d_model, head, num_nodes, seq_length=1, dropout=0.1):
-        "Take in model size and number of heads."
-        super(HGL_layer, self).__init__()
-        assert d_model % head == 0
-        self.d_k = d_model // head  # We assume d_v always equals d_k
-        self.head = head
-        self.num_nodes = num_nodes
-        self.seq_length = seq_length
-        self.d_model = d_model
-
-        
-        self.gcn = Diffusion_GCN(channels=256, diffusion_step=1, dropout=dropout)
-        self.gat = GAT(256, 256, dropout, alpha=0.2, nheads=1)
-        
-        self.LayerNorm = LayerNorm(
-            [d_model, num_nodes, seq_length], elementwise_affine=False
+        E_d = torch.tanh(
+            torch.einsum("bcnt, cm->bnm", x, self.E_s).contiguous()
         )
-        self.dropout1 = nn.Dropout(p=dropout)
-        self.glu = GLU(d_model)
-        self.dropout2 = nn.Dropout(p=dropout)
 
+        A_adp = torch.softmax(
+            F.relu(
+                torch.einsum("bnc, bmc->bnm", E_d, E_d).contiguous()
+                / math.sqrt(x.shape[1])
+            ),
+            -1,
+        )
+        
+        return (A_adp.mean(dim=0) > 0.5).float()
+
+
+class HGL(nn.Module):
+    def __init__(self, channels=128, layers = 2, num_nodes=170, length=12, diffusion_step=1, dropout=0.1, emb=None, device=None):
+        super().__init__()
+        self.conv = nn.Conv2d(channels,channels,(1,1))
+        self.layers = layers
+        self.generator = Graph_Generator(channels, num_nodes, length, diffusion_step, dropout)
+        
+        self.gcn = nn.ModuleList([
+            Diffusion_GCN(channels, 
+                          diffusion_step, 
+                          dropout)
+            for _ in range(self.layers)
+        ])
+        self.gat = nn.ModuleList([
+            GAT(channels, 
+                channels, 
+                dropout, 
+                alpha=0.2, 
+                nheads=1)
+            for _ in range(self.layers)
+        ])
+        
+        self.device = device
         self.alpha = nn.Parameter(torch.tensor(-5.0)) 
-        self.weight = nn.Parameter(torch.ones(256, self.num_nodes, 1))   
-        self.bias = nn.Parameter(torch.zeros(256, self.num_nodes, 1))
-        
+        self.emb =  nn.Parameter(torch.randn(channels, num_nodes, 12))
         self.nodevec1 = nn.Parameter(torch.randn(num_nodes, 6).to(device), requires_grad=True).to(device)
         self.nodevec2 = nn.Parameter(torch.randn(6, num_nodes).to(device), requires_grad=True).to(device)
         
-
-    def forward(self, input, D_Graph):
-        #print('input', input.shape)        #input torch.Size([64, 256, 170, 1])        
-
-        A_graph = F.softmax(F.relu(torch.mm(self.nodevec1, self.nodevec2)), dim=1).unsqueeze(0)
-        x_gcn = self.gcn(input, A_graph)
-
-        x_gat = self.gat(input.transpose(1,3), D_Graph).transpose(1,3)
-
-
-        alpha_sigmoid = torch.sigmoid(self.alpha)  
-        x =  alpha_sigmoid* x_gat +  (1 - alpha_sigmoid) * x_gcn
+        self.conv_gcn = nn.Conv2d(in_channels=channels,
+                                    out_channels=channels,
+                                    kernel_size=(1, 1))
         
-        x = x + input
-        x = self.LayerNorm(x)
-        x = self.dropout1(x)
-        x = self.glu(x) + x
-        x = x * self.weight + self.bias + x
-        x = self.LayerNorm(x)
-        x = self.dropout2(x)
+        self.conv_gat = nn.Conv2d(in_channels=channels,
+                                    out_channels=channels,
+                                    kernel_size=(1, 1))
         
-
+        self.conv_fusion = nn.Conv2d(in_channels=channels,
+                                    out_channels=channels,
+                                    kernel_size=(1, 1))
+        self.alpha = nn.Parameter(torch.tensor(-5.0))
+    def forward(self, x):
+        
+        A_adp = F.softmax(
+                    F.relu(torch.mm(self.nodevec1, self.nodevec2)),
+                    dim=1).unsqueeze(0)
+        skip = x
+        x = self.conv(x)
+        A_dyn = self.generator(x)
+        for gcn_layer in self.gcn:
+            x_gcn = gcn_layer(x, A_adp) 
+        x_gcn = self.conv_gcn(x_gcn)
+            #print(x_gcn.shape)
+        for gat_layer in self.gat:
+            x_gat = gat_layer(x.transpose(1, 3), A_dyn).transpose(1, 3)
+        x_gat = self.conv_gat(x_gat)
+            
+        alpha_sigmoid = torch.sigmoid(self.alpha)
+        x = alpha_sigmoid * x_gcn + (1 - alpha_sigmoid) * x_gat
+        x = self.conv_fusion(x)
+        x = x*self.emb + skip
         return x
-    
-    
-class HybridGraphLearner(nn.Module):
-    def __init__(self, device, d_model, head, num_nodes, seq_length, dropout, num_layers):
-        super(HybridGraphLearner, self).__init__()
-        
-        
-        self.layers = nn.ModuleList([
-            HGL_layer(device, 
-                    d_model=d_model, 
-                    head=head, 
-                    num_nodes=num_nodes, 
-                    seq_length=seq_length, 
-                    dropout=dropout)
-            for _ in range(num_layers)  
-        ])
 
-    def forward(self, x, D_Graph):
-        #print(x.shape)
-        for layer in self.layers:
-            x = layer(x, D_Graph)
-        return x
+
 
 class HSTGNN(nn.Module):
     def __init__(
-        self,
-        device,
-        input_dim=3,
-        channels=64,
-        num_nodes=883,
-        input_len=12,
-        output_len=12,
-        dropout=0.1,
+        self, device, input_dim, num_nodes, channels, granularity, dropout=0.1
     ):
         super().__init__()
 
-        # attributes
         self.device = device
         self.num_nodes = num_nodes
-        self.node_dim = channels
-        self.input_len = input_len
-        self.input_dim = input_dim
-        self.output_len = output_len
-        self.head = 1
-        self.layers = 2
-        self.dims = 6
+        self.output_len = 12
+        diffusion_step = 1
 
-        if num_nodes == 170 or num_nodes == 304 or num_nodes == 307 or num_nodes == 325:
-            time = 288
-            self.layers = 2
-        elif num_nodes == 358 :
-            time = 288
-            self.layers = 1
+        self.Temb = TemporalEmbedding(granularity, channels)
 
-        self.Temb = TemporalEmbedding(time, channels)
-        self.start_conv_res = nn.Conv2d(self.input_dim, channels, kernel_size=(1, 1)) 
-        self.start_conv_1 = nn.Conv2d(self.input_dim, channels, kernel_size=(1, 1))  
-        self.start_conv_2 = nn.Conv2d(self.input_dim, channels, kernel_size=(1, 1))  
-        self.network_channel = channels * 2
-        
+        self.start_conv_l = nn.Conv2d(
+            in_channels=input_dim, out_channels=channels, kernel_size=(1, 1)
+        )
+        self.start_conv_h = nn.Conv2d(
+            in_channels=input_dim, out_channels=channels, kernel_size=(1, 1)
+        )
+
+
+        self.layers = 4
         self.DCL = DualChannelLearner(
-            features = 128, 
+            features = channels, 
             layers = self.layers, 
-            length = self.input_len, 
+            length = self.output_len, 
             num_nodes = self.num_nodes, 
             dropout=0.1
         )
         
-        
-        self.HGL = HybridGraphLearner(
-            device,
-            d_model = self.network_channel,
-            head = self.head,
-            num_nodes = num_nodes,
-            seq_length = 1,
-            dropout = dropout,
-            num_layers = self.layers
-        )
-        
-        
-        self.MLP = nn.Conv2d(
-            in_channels=3,
-            out_channels=self.dims,
-            kernel_size=(1, 1)
+        self.HGL = HGL(
+            channels=channels*2, 
+            layers = self.layers, 
+            num_nodes=num_nodes, 
+            length = self.output_len, 
+            diffusion_step=1, 
+            dropout=0.1, 
+            emb=None,
+            device=self.device
         )
 
-        self.E_s = nn.Parameter(torch.randn(64, self.dims, num_nodes, 1).to(device), requires_grad=True).to(device)
-        
-        self.fc_d = nn.Conv2d(channels, self.dims, kernel_size=(1, 1))
-        self.fc_w = nn.Conv2d(channels, self.dims, kernel_size=(1, 1))
-        
-        self.fc_st = nn.Conv2d(
-            self.network_channel, self.network_channel, kernel_size=(1, 1)
-        )
+        self.glu = GLU(channels*2, dropout)
 
         self.regression_layer = nn.Conv2d(
-            self.network_channel, self.output_len, kernel_size=(1, 1)
+            channels*2, self.output_len, kernel_size=(1, self.output_len)
         )
-        
-        
-        
 
     def param_num(self):
         return sum([param.nelement() for param in self.parameters()])
 
-    def forward(self, history_data):
+    def forward(self, input):
         
-        #res = history_data
-        input_data = history_data
+        input_data = input
         residual_cpu = input_data.cpu()
         residual_numpy = residual_cpu.detach().numpy()
         coef = pywt.wavedec(residual_numpy, 'db1', level=2)
@@ -465,28 +386,18 @@ class HSTGNN(nn.Module):
 
         xl = torch.from_numpy(xl).to(self.device)
         xh = torch.from_numpy(xh).to(self.device)
-
-        input_data_1 = self.start_conv_1( xl)  
-        input_data_2 = self.start_conv_2( xh)  
-
-
-        input_data = self.DCL(input_data_1, input_data_2)
-        E_tod, E_dow = self.Temb(history_data.permute(0, 3, 2, 1))
-        TE = E_tod + E_dow
         
-        E_d = torch.tanh(self.MLP(history_data)[..., -1].unsqueeze(-1)* 
-                    (self.fc_d(self.Temb(history_data.permute(0, 3, 2, 1))[0]) * 
-                     self.fc_w(self.Temb(history_data.permute(0, 3, 2, 1))[1])) * 
-                     self.E_s)[-1, ..., -1]
+        x = input
+        x_l = self.start_conv_l(xl + x)
+        x_h = self.start_conv_h(xh + x)
 
-        D_graph = F.softmax(F.relu(torch.mm(E_d.transpose(0, 1), E_d)), dim= 1)
+        x = self.DCL(x_l, x_h)
+        time_emb = self.Temb(input.permute(0, 3, 2, 1))
+        x = torch.cat([x] + [time_emb], dim=1)
+        x = self.HGL(x)
 
-        data_st = torch.cat([input_data] + [TE], dim=1)
-
-        skip = self.fc_st(data_st)
-        data_st = self.HGL(data_st, D_graph) + skip
-
-
-        prediction = self.regression_layer(data_st)
-
+        x_final = self.glu(x) + x
+        
+        prediction = self.regression_layer(F.relu(x_final))
         return prediction
+    
