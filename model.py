@@ -260,7 +260,7 @@ class Graph_Generator(nn.Module):
         return (A_adp.mean(dim=0) > 0.5).float()
 
 
-class HGL(nn.Module):
+class HybridGraphLearner(nn.Module):
     def __init__(self, channels=128, layers = 2, num_nodes=170, length=12, diffusion_step=1, dropout=0.1, emb=None, device=None):
         super().__init__()
         self.conv = nn.Conv2d(channels,channels,(1,1))
@@ -354,7 +354,7 @@ class HSTGNN(nn.Module):
             dropout=0.1
         )
         
-        self.HGL = HGL(
+        self.HGL = HybridGraphLearner(
             channels=channels*2, 
             layers = self.layers, 
             num_nodes=num_nodes, 
