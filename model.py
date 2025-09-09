@@ -242,8 +242,9 @@ class Graph_Generator(nn.Module):
         self.fc = nn.Linear(2,1)
         
     def forward(self, x):
+        #E_t = X*E_w*E_d
         E_t = x*self.E_tod*self.E_tod
-        
+
         E_d = torch.tanh(
             torch.einsum("bcnt, cm->bnm", x, self.E_s).contiguous()
         )
@@ -314,7 +315,7 @@ class HGL(nn.Module):
         for gat_layer in self.gat:
             x_gat = gat_layer(x.transpose(1, 3), A_dyn).transpose(1, 3)
         x_gat = self.conv_gat(x_gat)
-            
+        #spatial gate
         alpha_sigmoid = torch.sigmoid(self.alpha)
         x = alpha_sigmoid * x_gcn + (1 - alpha_sigmoid) * x_gat
         x = self.conv_fusion(x)
@@ -376,6 +377,7 @@ class HSTGNN(nn.Module):
     def forward(self, input):
         
         input_data = input
+        #decoupling layer
         residual_cpu = input_data.cpu()
         residual_numpy = residual_cpu.detach().numpy()
         coef = pywt.wavedec(residual_numpy, 'db1', level=2)
@@ -383,21 +385,20 @@ class HSTGNN(nn.Module):
         coefh = [None] + coef[1:]
         xl = pywt.waverec(coefl, 'db1')
         xh = pywt.waverec(coefh, 'db1')
-
         xl = torch.from_numpy(xl).to(self.device)
         xh = torch.from_numpy(xh).to(self.device)
-        
+        #start conv
         x = input
         x_l = self.start_conv_l(xl + x)
         x_h = self.start_conv_h(xh + x)
-
+        #DCL
         x = self.DCL(x_l, x_h)
         time_emb = self.Temb(input.permute(0, 3, 2, 1))
         x = torch.cat([x] + [time_emb], dim=1)
+        #HGL
         x = self.HGL(x)
-
+        #Output layer
         x_final = self.glu(x) + x
-        
         prediction = self.regression_layer(F.relu(x_final))
         return prediction
     
