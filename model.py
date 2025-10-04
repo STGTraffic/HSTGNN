@@ -4,6 +4,32 @@ import torch.nn.functional as F
 import math
 import pywt
 
+class MultiLayerPerceptron(nn.Module):
+    """Multi-Layer Perceptron with residual links."""
+
+    def __init__(self, input_dim, hidden_dim) -> None:
+        super().__init__()
+        self.fc1 = nn.Conv2d(
+            in_channels=input_dim,  out_channels=hidden_dim, kernel_size=(1, 1), bias=True)
+        self.fc2 = nn.Conv2d(
+            in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=(1, 1), bias=True)
+        self.act = nn.ReLU()
+        self.drop = nn.Dropout(p=0.15)
+
+    def forward(self, input_data: torch.Tensor) -> torch.Tensor:
+        """Feed forward of MLP.
+
+        Args:
+            input_data (torch.Tensor): input data with shape [B, D, N]
+
+        Returns:
+            torch.Tensor: latent repr
+        """
+
+        hidden = self.fc2(self.drop(self.act(self.fc1(input_data))))      # MLP
+        hidden = hidden + input_data                           # residual
+        return hidden
+    
 class GLU(nn.Module):
     def __init__(self, features, dropout=0.1):
         super(GLU, self).__init__()
@@ -343,9 +369,14 @@ class HSTGNN(nn.Module):
         self.start_conv_h = nn.Conv2d(
             in_channels=input_dim, out_channels=channels, kernel_size=(1, 1)
         )
+        self.start_conv = nn.Conv2d(
+            in_channels=input_dim, out_channels=channels, kernel_size=(1, 1)
+        )
+        self.mlp = nn.Sequential(
+                *[MultiLayerPerceptron(channels, channels) for _ in range(3)])
 
 
-        self.layers = 4
+        self.layers = 2
         self.DCL = DualChannelLearner(
             features = channels, 
             layers = self.layers, 
@@ -388,11 +419,12 @@ class HSTGNN(nn.Module):
         xl = torch.from_numpy(xl).to(self.device)
         xh = torch.from_numpy(xh).to(self.device)
         #start conv
-        x = input
-        x_l = self.start_conv_l(xl + x)
-        x_h = self.start_conv_h(xh + x)
+        res_x = input
+        x_l = self.start_conv_l(xl )
+        x_h = self.start_conv_h(xh )
+
         #DCL
-        x = self.DCL(x_l, x_h)
+        x = self.DCL(x_l, x_h) + self.mlp(self.start_conv(res_x ))
         time_emb = self.Temb(input.permute(0, 3, 2, 1))
         x = torch.cat([x] + [time_emb], dim=1)
         #HGL
