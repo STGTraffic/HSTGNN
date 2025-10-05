@@ -116,20 +116,6 @@ def main():
         num_nodes = 170
         granularity = 288
         channels = 48
-
-    elif args.data == "PEMS03":
-        args.data = "data//" + args.data
-        num_nodes = 358
-        args.epochs = 300
-        args.es_patience = 100
-        granularity = 288
-        channels = 32
-
-    elif args.data == "PEMS04":
-        args.data = "data//" + args.data
-        num_nodes = 307
-        granularity = 288
-        channels = 48
     
     elif args.data == "PEMS-BAY":
         args.data = "data//" + args.data
