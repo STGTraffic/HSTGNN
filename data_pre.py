@@ -65,13 +65,12 @@ def generate_graph_seq2seq_io_data(
 
 
 def generate_train_val_test(args):
-    # df = pd.read_hdf(args.traffic_df_filename)#用于读取.h5文件
+
         
-    df = np.load(args.traffic_df_filename)['data'][:, :, 0]#用于读取npz文件
+    df = np.load(args.traffic_df_filename)['data'][:, :, 0]#npz
         
     #df = pd.read_csv(args.traffic_df_filename, header=None).transpose()#Urban-core/Urban-mix
-    #with h5py.File(args.traffic_df_filename, 'r') as f:  # 用于读取NYC-bike和taxi数据集
-            #df = f['bike_drop'][:]       # 读取数据集的不同特征
+
     print('df', df.shape)
     # 0 is the latest observed sample.
     x_offsets = np.sort(
