@@ -116,52 +116,12 @@ def main():
         num_nodes = 170
         granularity = 288
         channels = 48
-    
-    elif args.data == "PEMS-BAY":
-        args.data = "data//" + args.data
-        num_nodes = 325
-        granularity = 288
-        channels = 48
-        
+
     elif args.data == "Urban-core":
         args.data = "data//" + args.data
         num_nodes = 304
         granularity = 288
         channels = 48
-
-
-    elif args.data == "PEMS07":
-        args.data = "data//" + args.data
-        num_nodes = 883
-        granularity = 288
-        channels = 128
-
-
-    elif args.data == "bike_drop":
-        args.data = "data//" + args.data
-        num_nodes = 250
-        granularity = 48
-        channels = 32
-
-
-    elif args.data == "bike_pick":
-        args.data = "data//" + args.data
-        num_nodes = 250
-        granularity = 48
-        channels = 32
-
-
-    elif args.data == "taxi_drop":
-        args.data = "data//" + args.data
-        num_nodes = 266
-        granularity = 48
-        channels = 96
-
-    elif args.data == "taxi_pick":
-        args.data = "data//" + args.data
-        num_nodes = 266
-        granularity = 48
-        channels = 96
 
 
     device = torch.device(args.device)
