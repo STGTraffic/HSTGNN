@@ -376,7 +376,7 @@ class HSTGNN(nn.Module):
                 *[MultiLayerPerceptron(channels, channels) for _ in range(3)])
 
 
-        self.layers = 2
+        self.layers = 4
         self.DCL = DualChannelLearner(
             features = channels, 
             layers = self.layers, 
