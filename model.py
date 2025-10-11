@@ -138,7 +138,9 @@ class DualChannelLearner(nn.Module):
         ])
 
         self.alpha = nn.Parameter(torch.tensor(-5.0))
-
+        self.conv_fusion = nn.Conv2d(in_channels=features,
+                                    out_channels=features,
+                                    kernel_size=(1, 1))
     def forward(self, XL, XH):
         res_xl = XL
         res_xh = XH
@@ -156,7 +158,7 @@ class DualChannelLearner(nn.Module):
 
         alpha_sigmoid = torch.sigmoid(self.alpha)
         output = alpha_sigmoid * XL + (1 - alpha_sigmoid) * XH
-
+        output = self.conv_fusion(output)
         return output 
     
 class Diffusion_GCN(nn.Module):
@@ -375,7 +377,7 @@ class HSTGNN(nn.Module):
         self.mlp = nn.Sequential(
                 *[MultiLayerPerceptron(channels, channels) for _ in range(3)])
 
-
+        
         self.layers = 4
         self.DCL = DualChannelLearner(
             features = channels, 
@@ -419,9 +421,10 @@ class HSTGNN(nn.Module):
         xl = torch.from_numpy(xl).to(self.device)
         xh = torch.from_numpy(xh).to(self.device)
         #start conv
+        
         res_x = input
-        x_l = self.start_conv_l(xl )
-        x_h = self.start_conv_h(xh )
+        x_l = self.start_conv_l(xl ) 
+        x_h = self.start_conv_h(xh ) 
 
         #DCL
         x = self.DCL(x_l, x_h) + self.mlp(self.start_conv(res_x ))
